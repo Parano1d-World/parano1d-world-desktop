@@ -1,0 +1,137 @@
+--- /tmp/iosrepo/Vendor/paramo1d/src/main.rs	2026-11-23 20:46:14.243697427 -0600
++++ paramo1d/src/main.rs	2026-11-23 22:02:32.539127588 -0600
+@@ -19,6 +19,9 @@
+ #[derive(Subcommand)]
+ enum Command {
+     Profile,
++    /// Desktop wallet bridge: one JSON request on stdin, one JSON result on stdout. Only read-only verification
++    /// operations are allowed (sync, transaction lookup over peers, receipt check, balance probe); nothing signs or sends.
++    Api,
+     PeerWallet {
+         #[arg(long)]
+         artifacts: PathBuf,
+@@ -97,6 +100,31 @@
+             height,
+         } => paramo1d::collector::export(&node_data, &output, height)?,
+         Command::Profile => serde_json::to_value(artifacts::profile())?,
++        Command::Api => {
++            use std::io::Read;
++            let mut input = Vec::new();
++            std::io::stdin().take(1_048_577).read_to_end(&mut input)?;
++            anyhow::ensure!(input.len() <= 1_048_576, "Request too large");
++            let request: serde_json::Value = serde_json::from_slice(&input)?;
++            let op = request["op"].as_str().unwrap_or("");
++            anyhow::ensure!(
++                matches!(op, "sync_once" | "transaction_status" | "receipt_check" | "peer_wallet_probe"),
++                "Operation not allowed"
++            );
++            // Like the phones: a receipt is checked only against the already accepted local boundary (no implicit sync).
++            let input = if op == "receipt_check" {
++                let mut req = request.clone();
++                let dir = std::path::PathBuf::from(req["data_dir"].as_str().unwrap_or(""));
++                let bundle = paramo1d::courier_api::accepted_bundle(&dir)
++                    .map_err(|_| anyhow::anyhow!("Synchronize the on-device node before verifying receipts"))?;
++                req["bundle"] = serde_json::json!(bundle);
++                req.as_object_mut().map(|o| o.remove("data_dir"));
++                serde_json::to_vec(&req)?
++            } else { input };
++            let result = paramo1d::courier_api::execute(&input);
++            anyhow::ensure!(result["ok"].as_bool() == Some(true), "{}", result["error"].as_str().unwrap_or("Verification failed"));
++            result["result"].clone()
++        }
+         Command::PrepareMatrixPins { artifacts } => artifacts::prepare_matrix_pins(&artifacts)?,
+         Command::PeerWallet {
+             artifacts,
+# --- 26 Nov 2026: payment context from this device's verified view, and sending an already signed payment ---
+--- a/paramo1d/src/mobile_wallet.rs	2026-11-26 22:14:06.895757212 -0600
++++ b/paramo1d/src/mobile_wallet.rs	2026-11-26 22:23:45.213763282 -0600
+@@ -531,6 +531,56 @@
+     Ok(())
+ }
+ 
++/// Desktop Wallet bridge: everything the wallet engine needs to plan one ordinary NOID payment, taken from this
++/// device's own verified view (direct to peers), in the same shape as a node's wallet context. Needs only the public
++/// address: the key stays in the wallet, which plans, checks and signs the payment itself.
++pub fn payment_context(args: &Value) -> Result<Value> {
++    let address = Address::parse(arg(args, "address")?)
++        .map_err(|e| anyhow::anyhow!("Invalid address: {e}"))?;
++    let (boundary, slots, proof_height) = view(args, address)?;
++    let epoch = noid_chain::consensus::tx_epoch_anchor_height_for_child(boundary.header.height + 1);
++    let anchor = boundary.anchor.context("Verified epoch header")?;
++    ensure!(anchor.height == epoch, "Payment epoch boundary");
++    let live = slots
++        .iter()
++        .filter(|(_, v)| **v != SlotValue::EMPTY && owner(**v) == address)
++        .map(|(index, v)| json!({"slot_index": index, "value": v.amount(), "creation_id": v.creation_id(), "owner": address.to_bech32(), "empty": false}))
++        .collect::<Vec<_>>();
++    ensure!(
++        live.len() <= 4096,
++        "This wallet has too many coins to spend at once; consolidate it first"
++    );
++    let empty = slots
++        .iter()
++        .filter(|(_, v)| **v == SlotValue::EMPTY)
++        .map(|(index, _)| *index)
++        .take(8)
++        .collect::<Vec<_>>();
++    ensure!(empty.len() >= 2, "Refresh State to obtain available output slots");
++    let fees = (1..=live.len().clamp(1, 64) as u64)
++        .map(|inputs| {
++            noid_chain::consensus::fees::fee_breakdown(
++                inputs,
++                2,
++                boundary.header.active_slot_count,
++                boundary.header.log_slots,
++            )
++            .required_total
++        })
++        .collect::<Vec<_>>();
++    Ok(json!({
++        "owner": address.to_bech32(),
++        "slots": live,
++        "empty": empty,
++        "anchor_hex": hex::encode(noid_chain::block_header::block_id(&anchor)),
++        "fees": fees,
++        "height": boundary.header.height,
++        "tipHash": hex::encode(noid_chain::block_header::block_id(&boundary.header)),
++        "balance_height": proof_height,
++        "source": "this-device"
++    }))
++}
++
+ pub fn prepare(args: &Value) -> Result<Value> {
+     let mut cached = args["use_cached"].as_bool() == Some(true);
+     let master = seed(args)?;
+--- a/paramo1d/src/courier_api.rs	2026-11-26 22:14:06.896199528 -0600
++++ b/paramo1d/src/courier_api.rs	2026-11-26 22:14:18.924360211 -0600
+@@ -207,6 +207,7 @@
+             Path::new(text(request, "data_dir")?),
+         ),
+         "peer_wallet_probe" => crate::peer_wallet::probe(request),
++        "payment_context" => crate::mobile_wallet::payment_context(request),
+         "payment_preview" => crate::mobile_wallet::prepare(request),
+         "payment_authorize" => crate::mobile_wallet::authorize(request),
+         "transaction_status" => transaction_status(request),
+--- a/paramo1d/src/main.rs	2026-11-26 22:14:06.896140428 -0600
++++ b/paramo1d/src/main.rs	2026-11-26 22:14:18.928374326 -0600
+@@ -19,8 +19,9 @@
+ #[derive(Subcommand)]
+ enum Command {
+     Profile,
+-    /// Desktop wallet bridge: one JSON request on stdin, one JSON result on stdout. Only read-only verification
+-    /// operations are allowed (sync, transaction lookup over peers, receipt check, balance probe); nothing signs or sends.
++    /// Desktop wallet bridge: one JSON request on stdin, one JSON result on stdout. Allowed: sync, transaction lookup
++    /// over peers, receipt check, balance probe, a payment context from the verified view (address only) and sending
++    /// a payment the wallet has already signed. Nothing here ever sees a key or signs.
+     Api,
+     PeerWallet {
+         #[arg(long)]
+@@ -108,7 +109,7 @@
+             let request: serde_json::Value = serde_json::from_slice(&input)?;
+             let op = request["op"].as_str().unwrap_or("");
+             anyhow::ensure!(
+-                matches!(op, "sync_once" | "transaction_status" | "receipt_check" | "peer_wallet_probe"),
++                matches!(op, "sync_once" | "transaction_status" | "receipt_check" | "peer_wallet_probe" | "payment_context" | "broadcast_send"),
+                 "Operation not allowed"
+             );
+             // Like the phones: a receipt is checked only against the already accepted local boundary (no implicit sync).

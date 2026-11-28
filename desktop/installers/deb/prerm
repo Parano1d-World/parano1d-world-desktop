@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+pkill -f /opt/parano1d-world-wallet/parano1d-world-wallet 2>/dev/null || true
+exit 0

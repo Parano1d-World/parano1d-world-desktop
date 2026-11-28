@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Parano1d World Wallet
+Comment=Parano1d World Desktop Wallet
+Exec=/opt/parano1d-world-wallet/parano1d-world-wallet %U
+Icon=/usr/lib/parano1d-world-wallet/icon.png
+Terminal=false
+Categories=Finance;Network;
+StartupWMClass=Parano1d World Wallet

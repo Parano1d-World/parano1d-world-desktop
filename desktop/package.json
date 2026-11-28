@@ -1,0 +1,9 @@
+{
+  "name": "parano1d-world-wallet",
+  "productName": "Parano1d World Wallet",
+  "version": "1.0.0",
+  "description": "Parano1d World Desktop Wallet",
+  "main": "boot.js",
+  "license": "UNLICENSED",
+  "private": true
+}

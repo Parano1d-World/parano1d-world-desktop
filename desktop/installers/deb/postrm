@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+# Removes the runtime the package put in /opt. Wallet data in each user's ~/.config/Parano1d World Wallet is kept
+# (the app's own Uninstall button can erase it, after the master key is backed up).
+case "$1" in remove|purge|abort-install) rm -rf /opt/parano1d-world-wallet /opt/parano1d-world-wallet.new /opt/parano1d-world-wallet.old ;; esac
+exit 0

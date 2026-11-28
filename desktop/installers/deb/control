@@ -1,0 +1,13 @@
+Package: parano1d-world-wallet
+Version: __DEB_VERSION__
+Architecture: all
+Maintainer: Parano1d World <support@koajent.com>
+Depends: curl, unzip, ca-certificates, perl-base
+Section: net
+Priority: optional
+Homepage: https://parano1dworld.com/desktop-wallet
+Description: Parano1d World Desktop Wallet
+ Send and receive NOID, Parano1d tokens and NFTs, private chat and mining.
+ Keys are created and encrypted on this computer and never leave it.
+ During installation the official Electron runtime is downloaded from GitHub
+ and checked against a pinned SHA-256 before it is used.
